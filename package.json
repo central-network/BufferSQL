@@ -1,0 +1,12 @@
+{
+  "name": "buffersql",
+  "version": "1.0.0",
+  "description": "NodeJS and Javascript Izomorphic SQL Multithread Database on SharedArrayBuffer",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "type": "module"
+}
