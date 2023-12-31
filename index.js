@@ -26,9 +26,35 @@ TableStore = (function() {
         });
       }
     },
+    byteStride: {
+      get: function() {
+        return this.headers.stride;
+      }
+    },
+    index: {
+      get: function() {
+        return this.headers.storeIndex;
+      }
+    },
+    columnsField: {
+      get: function() {
+        return `(${this.columnNames})`;
+      }
+    },
     hasColumn: {
       value: function() {
         return this.columnNames.includes(arguments[0]);
+      }
+    },
+    getColumn: {
+      value: function(columnName) {
+        var column;
+        if (!(column = this.headers.columns.find(function(c) {
+          return c.name === columnName;
+        }))) {
+          throw [TYPE.THERE_IS_NO_COLUMN_NAMED_WITH, columnName];
+        }
+        return column;
       }
     }
   });
@@ -98,21 +124,86 @@ export var BufferSQLServer = (function() {
     }
 
     select(sql) {
-      var column, columns, i, len, split, table;
+      var column, columnName, columnNames, columnValue, columns, condition, j, k, len, len1, limit, matchs, offset, operator, parsedValue, ref, searchOffset, split, stride, table, value;
       split = sql.split(/FROM/i, 2).filter(Boolean);
-      table = this.getTable(split[1].trim());
+      table = this.getTable(split[1].split(/where/i, 1)[0].trim());
+      matchs = [];
+      offset = table.offset();
+      stride = table.byteStride;
       if (!(columns = split[0].replace(/\s|\*/g, ""))) {
-        columns = table.columnNames;
+        columnNames = table.columnNames;
       } else {
-        columns = columns.split(/\,/g);
+        columnNames = columns.split(/\,/g);
       }
-      for (i = 0, len = columns.length; i < len; i++) {
-        column = columns[i];
-        if (!table.hasColumn(column)) {
-          throw [TYPE.TABLE_HAS_NOT_COLUMN, column];
+      for (j = 0, len = columnNames.length; j < len; j++) {
+        columnName = columnNames[j];
+        if (!table.hasColumn(columnName)) {
+          throw [TYPE.TABLE_HAS_NOT_COLUMN, columnName];
         }
       }
-      return {table, columns};
+      ref = sql.split(/where/i)[1].split(/and|or/i);
+      for (k = 0, len1 = ref.length; k < len1; k++) {
+        condition = ref[k];
+        [columnName, value] = condition.split(/>=|<=|>|<|=|<>|\!=|=/).map(function(c) {
+          return c.trim();
+        });
+        if (!table.hasColumn(columnName)) {
+          throw [TYPE.TABLE_HAS_NOT_COLUMN, columnNames];
+        }
+        limit = offset;
+        column = table.getColumn(columnName);
+        operator = condition.match(/(>=|<=|>|<|=|<>|\!=|=)/)[0];
+        parsedValue = column.parse(value);
+        searchOffset = 0;
+        while (searchOffset < limit) {
+          columnValue = column.decode(table, searchOffset);
+          switch (operator) {
+            case ">=":
+              if (columnValue >= parsedValue) {
+                matchs.push(searchOffset);
+              }
+          }
+          searchOffset += stride;
+        }
+      }
+      return matchs;
+    }
+
+    insert(sql) {
+      var fn, query, type;
+      [type, ...query] = sql.trim().split(" ");
+      if (!/into/.test(fn = type.toLowerCase())) {
+        throw [TYPE.NO_DEFINED_METHOD, type];
+      }
+      switch (fn) {
+        case "into":
+          return this.insertInto(query.join(" "));
+      }
+    }
+
+    insertInto(query) {
+      var column, columnName, columns, i, j, len, offset, table, tableName, value, values;
+      [tableName] = query.split(/\s|\(/g, 1).filter(Boolean);
+      table = this.getTable(tableName);
+      query = query.split(tableName)[1];
+      if (!/VALUES/i.test(query)) {
+        [columns = table.columnsField, values = query];
+      } else {
+        [columns, values] = query.split(/values/i);
+      }
+      columns = columns.substring(columns.indexOf("(") + 1, columns.lastIndexOf(")")).split(/\,/);
+      values = values.substring(values.indexOf("(") + 1, values.lastIndexOf(")")).split(/\,/);
+      if (columns.length !== values.length) {
+        throw [TYPE.COLUMN_COUNT_MUST_EQUAL_TO_VALUE_COUNT];
+      }
+      offset = table.alloc();
+      for (i = j = 0, len = columns.length; j < len; i = ++j) {
+        columnName = columns[i];
+        column = table.getColumn(columnName);
+        value = column.parse(values[i], column.size);
+        table.set(column.encode(value), offset + column.begin);
+      }
+      return offset / table.byteStride;
     }
 
     encodeText(text) {
@@ -124,14 +215,14 @@ export var BufferSQLServer = (function() {
     }
 
     createTable(query, options = {}) {
-      var allocIndex, byteLength, byteOffset, column, columns, i, len, name, offset, size, storeIndex, stride, table, tableHeaders, type;
+      var allocIndex, byteLength, byteOffset, column, columns, j, len, name, offset, size, storeIndex, stride, table, tableHeaders, type;
       [table] = query.split(/\s|\(/g).filter(Boolean);
       [...columns] = query.substring(query.indexOf("(") + 1, query.lastIndexOf(")")).trim().split(/\,/g);
       columns = (function() {
-        var i, len, results;
+        var j, len, results;
         results = [];
-        for (i = 0, len = columns.length; i < len; i++) {
-          column = columns[i];
+        for (j = 0, len = columns.length; j < len; j++) {
+          column = columns[j];
           [name, type, ...size] = column.split(/\s|\(|\)/g).filter(Boolean);
           type = type.toLowerCase();
           size = this.getColumnByteLength(type, size.join(" "));
@@ -145,10 +236,13 @@ export var BufferSQLServer = (function() {
         return d + e;
       });
       offset = 0;
-      for (i = 0, len = columns.length; i < len; i++) {
-        column = columns[i];
+      for (j = 0, len = columns.length; j < len; j++) {
+        column = columns[j];
         column.begin = offset;
         column.end = offset += column.size;
+        column.parse = this.getTypeParser(column);
+        column.encode = this.getTypeEncoder(column);
+        column.decode = this.getTypeDecoder(column);
       }
       options = {...this._tableOptions, ...options};
       byteLength = options.rowLength * stride;
@@ -165,14 +259,22 @@ export var BufferSQLServer = (function() {
     }
 
     getTable(table) {
-      var headers, i, len, ref;
+      var headers, j, len, ref;
       ref = this.headersArray;
-      for (i = 0, len = ref.length; i < len; i++) {
-        headers = ref[i];
+      for (j = 0, len = ref.length; j < len; j++) {
+        headers = ref[j];
         if (headers.table !== table) {
           continue;
         }
-        return Object.assign(new TableStore(this.buffer, headers.byteOffset, headers.byteLength), {headers});
+        return Object.assign(new TableStore(this.buffer, headers.byteOffset, headers.byteLength), {
+          headers: headers,
+          alloc: (byteLength = headers.stride) => {
+            return Atomics.add(this.uInt32Array, headers.allocIndex, byteLength);
+          },
+          offset: () => {
+            return Atomics.load(this.uInt32Array, headers.allocIndex);
+          }
+        });
       }
       throw [TYPE.TABLE_CANT_FOUND_ON_THIS_DATABASE, table];
     }
@@ -185,6 +287,55 @@ export var BufferSQLServer = (function() {
           return parseFloat(options || 255);
         default:
           throw TYPE.TYPE_IS_UNDEFINED_FOR_FIND_OPTIONS;
+      }
+    }
+
+    getTypeParser(column) {
+      switch (column.type) {
+        case "int":
+          return Number;
+        case "varchar":
+          return function(s) {
+            return s.trim().split(/\'|\"/, 2)[1].substr(0, column.size);
+          };
+      }
+    }
+
+    getTypeEncoder(column) {
+      switch (column.type) {
+        case "int":
+          switch (column.size) {
+            case 1:
+              return function(num) {
+                return new Uint8Array([num]);
+              };
+            case 2:
+              return function(num) {
+                return new Uint16Array([num]);
+              };
+            case 4:
+              return function(num) {
+                return new Uint32Array([num]);
+              };
+          }
+          break;
+        case "varchar":
+          return (s) => {
+            return this.textEncoder.encode(s);
+          };
+      }
+    }
+
+    getTypeDecoder(column) {
+      switch (column.type) {
+        case "int":
+          return (table, offset) => {
+            return this.uInt32Array[table.headers.storeIndex + offset / 4];
+          };
+        case "varchar":
+          return (array, offset) => {
+            return this.textDecoder.decode(new Uint8Array(column.size).set(this.uInt8Array, array.byteOffset + offset, column.size));
+          };
       }
     }
 

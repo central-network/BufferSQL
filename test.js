@@ -18,4 +18,8 @@ server.query("CREATE TABLE Persons ( PersonID int, LastName varchar(255), FirstN
 
 persons = server.getTable("Persons");
 
-console.log(server.query("SELECT * FROM Persons"));
+console.log("index0:", server.query("INSERT INTO Persons (1,'lname','fname','addr', 'city')"));
+
+console.log("index1:", server.query("INSERT INTO Persons (LastName,FirstName) VALUES ('2lname','fname3')"));
+
+console.log("select0:", server.query("SELECT * FROM Persons WHERE PersonID >= 1"));

@@ -12,8 +12,23 @@ class TableStore extends Uint8Array
         columnNames : get   : ->
             @headers.columns.slice().map (c) -> c.name
 
+        byteStride  : get   : ->
+            @headers.stride
+
+        index  : get   : ->
+            @headers.storeIndex
+
+        columnsField : get   : ->
+            "(#{@columnNames})"
+
         hasColumn   : value : ->
             @columnNames.includes arguments[0]
+
+        getColumn   : value : ( columnName ) ->
+            unless column = @headers.columns.find (c) -> c.name is columnName
+                throw [ TYPE.THERE_IS_NO_COLUMN_NAMED_WITH, columnName ]
+            column
+
 
 export class BufferSQLServer extends EventEmitter
     @MODE_ISOLATED = TYPE.MODE_ISOLATED
@@ -97,17 +112,90 @@ export class BufferSQLServer extends EventEmitter
 
     select : ( sql ) ->
         split = sql.split(/FROM/i, 2).filter(Boolean)
-        table = @getTable split[1].trim()
+        table = @getTable split[1].split(/where/i,1)[0].trim()
+        
+        matchs = []
+        offset = table.offset()
+        stride = table.byteStride
 
         unless columns = split[0].replace(/\s|\*/g, "")
-            columns = table.columnNames
-        else columns = columns.split /\,/g
+            columnNames = table.columnNames
+        else columnNames = columns.split /\,/g
 
-        for column in columns
-            unless table.hasColumn column
-                throw [ TYPE.TABLE_HAS_NOT_COLUMN, column ]
+        for columnName in columnNames
+            unless table.hasColumn columnName
+                throw [ TYPE.TABLE_HAS_NOT_COLUMN, columnName ]
 
-        { table, columns }
+        for condition in sql.split(/where/i)[1].split(/and|or/i)
+            [ columnName, value ] =
+                condition.split( />=|<=|>|<|=|<>|\!=|=/ ).map (c) -> c.trim()
+
+            unless table.hasColumn columnName
+                throw [ TYPE.TABLE_HAS_NOT_COLUMN, columnNames ]
+
+            limit = offset
+            column = table.getColumn columnName
+            operator = condition.match( /(>=|<=|>|<|=|<>|\!=|=)/ )[0]
+            parsedValue = column.parse value
+            searchOffset = 0
+
+            while searchOffset < limit
+
+                columnValue = column.decode(
+                    table, searchOffset
+                )
+
+                switch operator
+                    when ">=" then if columnValue >= parsedValue
+                        matchs.push searchOffset
+                        
+                searchOffset += stride
+
+        matchs
+
+
+    insert : ( sql ) ->
+        [ type, ...query ] = sql.trim().split(" ")
+
+        unless /into/.test fn = type.toLowerCase()
+            throw [ TYPE.NO_DEFINED_METHOD, type ]
+
+        switch fn
+            when "into" then return @insertInto query.join(" ")
+
+    insertInto  : ( query ) ->
+        [ tableName ] = query.split(/\s|\(/g, 1).filter Boolean
+
+        table = @getTable tableName
+        query = query.split( tableName )[1]
+
+        unless /VALUES/i.test query
+            [ columns = table.columnsField, values = query ]
+
+        else
+            [ columns, values ] = query.split /values/i
+
+        columns = columns.substring(
+            columns.indexOf("(") + 1,
+            columns.lastIndexOf(")")
+        ).split /\,/
+
+        values = values.substring(
+            values.indexOf("(") + 1,
+            values.lastIndexOf(")")
+        ).split /\,/
+
+        unless columns.length is values.length
+            throw [ TYPE.COLUMN_COUNT_MUST_EQUAL_TO_VALUE_COUNT ]
+        
+        offset = table.alloc()
+
+        for columnName, i in columns
+            column = table.getColumn columnName
+            value = column.parse values[i], column.size
+            table.set column.encode( value ), offset + column.begin
+            
+        offset / table.byteStride
 
     encodeText  : ( text ) ->
         @textEncoder.encode text
@@ -140,6 +228,11 @@ export class BufferSQLServer extends EventEmitter
             column.begin = offset
             column.end   =
                 offset  += column.size
+            
+            column.parse  = @getTypeParser column
+            column.encode = @getTypeEncoder column
+            column.decode = @getTypeDecoder column
+
 
         options = {
             ...this._tableOptions,
@@ -171,7 +264,11 @@ export class BufferSQLServer extends EventEmitter
             continue unless headers.table is table
             return Object.assign new TableStore(
                 @buffer, headers.byteOffset, headers.byteLength
-            ), { headers }
+            ), { 
+                headers : headers,
+                alloc   : ( byteLength = headers.stride ) => Atomics.add @uInt32Array, headers.allocIndex, byteLength
+                offset  : => Atomics.load @uInt32Array, headers.allocIndex
+            }
 
         throw [ TYPE.TABLE_CANT_FOUND_ON_THIS_DATABASE, table ]
 
@@ -181,3 +278,28 @@ export class BufferSQLServer extends EventEmitter
             when "varchar" then parseFloat options or 255
             else throw TYPE.TYPE_IS_UNDEFINED_FOR_FIND_OPTIONS
         
+
+    getTypeParser       : ( column ) ->
+        switch column.type
+            when "int" then Number
+            when "varchar" then (s) -> s.trim().split(/\'|\"/,2)[1].substr(0, column.size)
+
+    getTypeEncoder      : ( column ) ->
+        switch column.type
+            when "int" then switch column.size
+                when 1 then ( num ) -> new Uint8Array [ num ]
+                when 2 then ( num ) -> new Uint16Array [ num ]
+                when 4 then ( num ) -> new Uint32Array [ num ]
+
+            when "varchar" then (s) => @textEncoder.encode s
+
+    getTypeDecoder      : ( column ) ->
+        switch column.type
+
+            when "int" then ( table, offset ) =>
+                @uInt32Array[ table.headers.storeIndex + offset / 4 ]
+
+            when "varchar" then ( array, offset ) =>
+                @textDecoder.decode new Uint8Array( column.size ).set(
+                    @uInt8Array, array.byteOffset + offset, column.size
+                )
