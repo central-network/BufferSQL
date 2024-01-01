@@ -48,7 +48,9 @@ parseSelect = ( query ) ->
         throw { error: "QUERY_HAS_AN_UNCLOSED_QUOTE", index, query }
 
     formPosition = 0
-    console.log 2, [...query.matchAll /from/gi]
+    console.log 2, [ ...query.matchAll /from/gi ].filter (d) ->
+        for range in forbiddenRanges
+            return if range[0] <= d.index
 
     #queryUpperCase = queryTrimmed.toUpperCase() 
 

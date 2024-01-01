@@ -48,7 +48,15 @@ parseSelect = function(query) {
     };
   }
   formPosition = 0;
-  console.log(2, [...query.matchAll(/from/gi)]);
+  console.log(2, [...query.matchAll(/from/gi)].filter(function(d) {
+    var i, len, range;
+    for (i = 0, len = forbiddenRanges.length; i < len; i++) {
+      range = forbiddenRanges[i];
+      if (range[0] <= d.index) {
+        return;
+      }
+    }
+  }));
   //queryUpperCase = queryTrimmed.toUpperCase() 
   return console.log({forbiddenRanges});
 };
