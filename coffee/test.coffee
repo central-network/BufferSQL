@@ -29,3 +29,31 @@ console.log "index1:", server.query("
 console.log "select0:", server.query("
     SELECT * FROM Persons WHERE PersonID >= 1
 ")
+
+parseSelect = ( query ) ->
+    forbiddenRanges = [[]]
+    index = 0
+
+    loop 
+        index = query.indexOf "`", index
+        break if index is -1
+
+        if  2 is forbiddenRanges[ forbiddenRanges.length-1 ].length
+            forbiddenRanges.push []
+    
+        forbiddenRanges[ forbiddenRanges.length-1 ].push index++
+
+
+    if  index = forbiddenRanges.find (e) -> e.length is 1
+        throw { error: "QUERY_HAS_AN_UNCLOSED_QUOTE", index, query }
+
+    formPosition = 0
+    console.log 2, [...query.matchAll /from/gi]
+
+    #queryUpperCase = queryTrimmed.toUpperCase() 
+
+    console.log { forbiddenRanges }
+
+
+parseSelect "SELECT *, Persons2.id, `Pers.from`, CONCAT(col1,col2) As col12, `Person.limit` FROM Persons as p WHERE col = 1 AND (col2 > col1) GROUP BY id ORDER BY id ASC, col1 LIMIT 1,10"
+#parseSelect "SELECT id, SUM(col2) As `col12` FROM Persons as p WHERE col = 1 AND (`col2` > col1) GROUP BY id ORDER BY id ASC, col1"

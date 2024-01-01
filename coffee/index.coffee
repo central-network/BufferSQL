@@ -148,7 +148,7 @@ export class BufferSQLServer extends EventEmitter
                 switch operator
                     when ">=" then if columnValue >= parsedValue
                         matchs.push searchOffset
-                        
+
                 searchOffset += stride
 
         matchs
